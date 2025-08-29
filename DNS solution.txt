@@ -1,0 +1,134 @@
+Got it — here’s a clear, do-this-then-that guide to stop the “switching” and kill the SSL error. Pick one path and follow it end-to-end.
+
+Step 0 — What’s happening
+
+Your hostname sometimes resolves to Cloudflare IPs and sometimes to the AWS ALB. A hostname must not have both A/AAAA records and a CNAME at the same time. That split routing is what leads to TLS confusion.
+
+Option A — Use Cloudflare as the front door (recommended if you want WAF, CDN, DDoS)
+A1) Confirm who’s authoritative
+
+At your domain registrar, make sure the zone’s NS records point to Cloudflare’s nameservers.
+
+From a shell:
+nslookup -type=ns pico-rivera.org
+The answers should be Cloudflare names like abby.ns.cloudflare.com, etc.
+
+A2) Clean up DNS in Cloudflare (DNS tab)
+
+Delete any A or AAAA records for nextgen311.pico-rivera.org.
+
+Create a CNAME:
+
+Name: nextgen311
+
+Target: engagedxprod-1904748490.us-west-1.elb.amazonaws.com
+
+Proxy status: Proxied (orange cloud = ON)
+
+If you have any duplicate records for this host in another DNS provider (e.g., Route 53), remove them. Only Cloudflare should be authoritative.
+
+A3) SSL/TLS settings in Cloudflare (SSL/TLS tab)
+
+Mode: Full (Strict)
+
+Minimum TLS: 1.2
+
+TLS 1.3: Enabled
+
+A4) Origin (AWS ALB)
+
+Listener :443 attached to an ACM cert that includes nextgen311.pico-rivera.org (you already have one).
+
+Use a modern TLS security policy (TLS 1.2/1.3).
+
+(Optional hardening) Remove legacy CBC ciphers if you’re allowed to choose a stricter policy.
+
+(Optional) Restrict ALB security group to Cloudflare IP ranges.
+
+A5) Verify
+
+Flush caches: ipconfig /flushdns (Windows)
+Chrome: chrome://net-internals/#sockets → “Flush sockets”
+
+DNS should return only Cloudflare IPs now:
+nslookup nextgen311.pico-rivera.org
+
+TLS to origin OK:
+openssl s_client -connect <ALB_DNS_NAME>:443 -servername nextgen311.pico-rivera.org | openssl x509 -noout -subject -issuer
+
+Browser test the site. Error should be gone.
+
+Option B — Go direct to the AWS ALB (no Cloudflare)
+B1) Make your public zone authoritative (if not Cloudflare)
+
+If your NS at the registrar point to Route 53 (or another provider), keep only that provider authoritative.
+
+B2) Clean up DNS (in Route 53 or your provider)
+
+Remove any A/AAAA records for nextgen311.pico-rivera.org that point to Cloudflare (104.21.x.x, 172.67.x.x, IPv6 2606:4700:…).
+
+Create a CNAME:
+
+Name: nextgen311.pico-rivera.org
+
+Value: engagedxprod-1904748490.us-west-1.elb.amazonaws.com
+
+TTL: 60–300s while testing
+
+Note: CNAME is fine here because nextgen311 is a subdomain (not the zone apex).
+
+B3) ALB TLS
+
+Listener :443 with your ACM cert that includes nextgen311.pico-rivera.org.
+
+Choose a modern TLS policy (TLS 1.2/1.3).
+
+(Optional) Add HTTP→HTTPS redirect on the 80 listener.
+
+B4) Verify
+
+Flush caches: ipconfig /flushdns
+
+Check DNS shows only the ALB:
+nslookup -type=cname nextgen311.pico-rivera.org
+nslookup nextgen311.pico-rivera.org (should return only ALB IPs)
+
+Check certificate over SNI:
+openssl s_client -connect nextgen311.pico-rivera.org:443 -servername nextgen311.pico-rivera.org | openssl x509 -noout -subject -issuer
+
+Browser test the site.
+
+If you still see both Cloudflare and ALB after changes
+
+You’re likely editing the wrong zone or have split-horizon DNS.
+
+Check the authoritative NS again:
+nslookup -type=ns pico-rivera.org
+
+Query a public resolver (bypasses your LAN DNS):
+nslookup nextgen311.pico-rivera.org 1.1.1.1
+nslookup nextgen311.pico-rivera.org 8.8.8.8
+
+If your office DNS (e.g., 192.168.0.1) shows different answers, fix/flush that internal DNS server.
+
+Quick command bundle (copy/paste)
+# Who’s authoritative
+nslookup -type=ns pico-rivera.org
+
+# What the world sees (two resolvers)
+nslookup nextgen311.pico-rivera.org 1.1.1.1
+nslookup nextgen311.pico-rivera.org 8.8.8.8
+
+# Any conflicting records
+nslookup -type=any nextgen311.pico-rivera.org 1.1.1.1
+
+# Verify certificate via SNI (should show your ACM subject & Amazon issuer)
+openssl s_client -connect nextgen311.pico-rivera.org:443 -servername nextgen311.pico-rivera.org | openssl x509 -noout -subject -issuer
+
+Which should you choose?
+
+Option A (Cloudflare): if you want CDN/WAF/DDoS protection and to lock the origin to Cloudflare only.
+
+Option B (Direct ALB): simpler, fewer moving parts.
+
+Follow the option you prefer, and run the verify commands at the end. If anything doesn’t match what I described (e.g., you still see mixed answers), tell me which option you took and which DNS provider’s console you’re editing, and I’ll tailor the exact record entries to your zone.
